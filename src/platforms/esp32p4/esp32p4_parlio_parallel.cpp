@@ -65,6 +65,14 @@ void Bus_Parallel16::release(void) {
         parlio_del_tx_unit(_tx_unit);
         _tx_unit = NULL;
     }
+    if (_shadow_buffer_a) {
+        free(_shadow_buffer_a);
+        _shadow_buffer_a = nullptr;
+    }
+    if (_shadow_buffer_b) {
+        free(_shadow_buffer_b);
+        _shadow_buffer_b = nullptr;
+    }
 }
 
 void Bus_Parallel16::enable_double_dma_desc() {
@@ -72,21 +80,52 @@ void Bus_Parallel16::enable_double_dma_desc() {
 }
 
 bool Bus_Parallel16::allocate_dma_desc_memory(size_t len) {
-    // No manual descriptor allocation needed for parlio driver
+    // Clear previous scatter lists
+    _scatter_a.clear();
+    _scatter_b.clear();
     return true;
 }
 
 void Bus_Parallel16::create_dma_desc_link(void *memory, size_t size, bool dmadesc_b) {
     if (dmadesc_b) {
-        _buffer_b = memory;
+        _scatter_b.push_back({memory, size});
     } else {
-        _buffer_a = memory;
+        _scatter_a.push_back({memory, size});
     }
-    _buffer_size = size;
+}
+
+void Bus_Parallel16::consolidate_buffer(const std::vector<Chunk>& scatter, uint8_t*& shadow, size_t& total_size) {
+    // Calculate total size
+    size_t new_size = 0;
+    for (const auto& chunk : scatter) {
+        new_size += chunk.size;
+    }
+
+    // Reallocate if needed
+    if (shadow == nullptr || total_size != new_size) {
+        if (shadow) free(shadow);
+        shadow = (uint8_t*)heap_caps_malloc(new_size, MALLOC_CAP_DMA);
+        total_size = new_size;
+    }
+
+    if (!shadow) {
+        ESP_LOGE(TAG_PARLIO, "Failed to allocate shadow buffer of size %d", new_size);
+        return;
+    }
+
+    // Copy data
+    size_t offset = 0;
+    for (const auto& chunk : scatter) {
+        memcpy(shadow + offset, chunk.ptr, chunk.size);
+        offset += chunk.size;
+    }
 }
 
 void Bus_Parallel16::dma_transfer_start() {
-    if (!_tx_unit || !_buffer_a) return;
+    if (!_tx_unit) return;
+
+    consolidate_buffer(_scatter_a, _shadow_buffer_a, _shadow_size);
+    if (!_shadow_buffer_a) return;
 
     parlio_transmit_config_t transmit_config = {
         .idle_value = 0x00,
@@ -96,7 +135,7 @@ void Bus_Parallel16::dma_transfer_start() {
     };
 
     // Start with buffer A
-    esp_err_t ret = parlio_tx_unit_transmit(_tx_unit, _buffer_a, _buffer_size * 8, &transmit_config);
+    esp_err_t ret = parlio_tx_unit_transmit(_tx_unit, _shadow_buffer_a, _shadow_size * 8, &transmit_config);
     if (ret != ESP_OK) {
             ESP_LOGE(TAG_PARLIO, "Failed to start transmission: %s", esp_err_to_name(ret));
     }
@@ -114,8 +153,30 @@ void Bus_Parallel16::flip_dma_output_buffer(int back_buffer_id) {
     if (!_tx_unit) return;
     
     // back_buffer_id is the one we just wrote to. So we want to display it.
-    void* buffer = (back_buffer_id == 1) ? _buffer_b : _buffer_a;
-    if (!buffer) return;
+    // Wait, flip_dma_output_buffer(id) usually means "display the OTHER one"?
+    // In gdma_lcd_parallel16.cpp:
+    // if ( back_buffer_id == 1) // change across to everything 'b''
+    //    _dmadesc_b...next = _dmadesc_b...
+    //    _dmadesc_a...next = _dmadesc_b...
+    // So if back_buffer_id is 1 (Buffer B), it means we just finished writing to B, so we want to display B?
+    // Or does it mean "Make B the back buffer"?
+    // The library calls: flip_dma_output_buffer(back_buffer_id)
+    // In MatrixPanel_I2S_DMA::showDMABuffer():
+    //   flip_dma_output_buffer(back_buffer_id);
+    //   back_buffer_id ^= 1;
+    // So back_buffer_id is the one we were writing to. We want to SHOW it now.
+    
+    uint8_t* buffer_to_show = nullptr;
+    
+    if (back_buffer_id == 1) {
+        consolidate_buffer(_scatter_b, _shadow_buffer_b, _shadow_size);
+        buffer_to_show = _shadow_buffer_b;
+    } else {
+        consolidate_buffer(_scatter_a, _shadow_buffer_a, _shadow_size);
+        buffer_to_show = _shadow_buffer_a;
+    }
+
+    if (!buffer_to_show) return;
 
     parlio_transmit_config_t transmit_config = {
         .idle_value = 0x00,
@@ -124,7 +185,7 @@ void Bus_Parallel16::flip_dma_output_buffer(int back_buffer_id) {
         }
     };
 
-    esp_err_t ret = parlio_tx_unit_transmit(_tx_unit, buffer, _buffer_size * 8, &transmit_config);
+    esp_err_t ret = parlio_tx_unit_transmit(_tx_unit, buffer_to_show, _shadow_size * 8, &transmit_config);
     if (ret != ESP_OK) {
             ESP_LOGE(TAG_PARLIO, "Failed to flip buffer: %s", esp_err_to_name(ret));
     }
