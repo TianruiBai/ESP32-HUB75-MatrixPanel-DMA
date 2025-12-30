@@ -4,6 +4,7 @@
 
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 
 static const char *TAG_PARLIO = "ESP32P4_PARLIO";
 
