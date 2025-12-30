@@ -7,6 +7,10 @@
 
 static const char *TAG_PARLIO = "ESP32P4_PARLIO";
 
+const Bus_Parallel16::config_t& Bus_Parallel16::config(void) const {
+    return _cfg;
+}
+
 void Bus_Parallel16::config(const config_t& config) {
     _cfg = config;
 }
