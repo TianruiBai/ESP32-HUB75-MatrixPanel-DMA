@@ -11,6 +11,7 @@
 
 // Define descriptor type as void* since we don't use it directly but the library expects a type
 #define HUB75_DMA_DESCRIPTOR_T void 
+#define DMA_MAX (4096-4)
 
 class Bus_Parallel16 
 {

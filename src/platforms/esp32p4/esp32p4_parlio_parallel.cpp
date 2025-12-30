@@ -16,18 +16,23 @@ bool Bus_Parallel16::init(void) {
     
     parlio_tx_unit_config_t config = {
         .clk_src = PARLIO_CLK_SRC_DEFAULT,
+        .clk_in_gpio_num = (gpio_num_t)-1,
+        .input_clk_src_freq_hz = 0,
+        .output_clk_freq_hz = _cfg.bus_freq,
         .data_width = 16,
-        .clk_in_gpio_num = -1,
-        .valid_gpio_num = -1,
-        .clk_out_gpio_num = _cfg.pin_wr,
         .data_gpio_nums = {
-            _cfg.pin_d0, _cfg.pin_d1, _cfg.pin_d2, _cfg.pin_d3,
-            _cfg.pin_d4, _cfg.pin_d5, _cfg.pin_d6, _cfg.pin_d7,
-            _cfg.pin_d8, _cfg.pin_d9, _cfg.pin_d10, _cfg.pin_d11,
-            _cfg.pin_d12, _cfg.pin_d13, _cfg.pin_d14, _cfg.pin_d15
+            (gpio_num_t)_cfg.pin_d0, (gpio_num_t)_cfg.pin_d1, (gpio_num_t)_cfg.pin_d2, (gpio_num_t)_cfg.pin_d3,
+            (gpio_num_t)_cfg.pin_d4, (gpio_num_t)_cfg.pin_d5, (gpio_num_t)_cfg.pin_d6, (gpio_num_t)_cfg.pin_d7,
+            (gpio_num_t)_cfg.pin_d8, (gpio_num_t)_cfg.pin_d9, (gpio_num_t)_cfg.pin_d10, (gpio_num_t)_cfg.pin_d11,
+            (gpio_num_t)_cfg.pin_d12, (gpio_num_t)_cfg.pin_d13, (gpio_num_t)_cfg.pin_d14, (gpio_num_t)_cfg.pin_d15
         },
+        .clk_out_gpio_num = (gpio_num_t)_cfg.pin_wr,
+        .valid_gpio_num = (gpio_num_t)-1,
+        .valid_start_delay = 0,
+        .valid_stop_delay = 0,
         .trans_queue_depth = 4, 
         .max_transfer_size = 256 * 1024, // Set a large enough buffer size (256KB)
+        .dma_burst_size = 0,
         .sample_edge = PARLIO_SAMPLE_EDGE_POS, 
     };
     

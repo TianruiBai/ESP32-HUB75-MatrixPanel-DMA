@@ -16,6 +16,10 @@
  PLEASE SUPPORT THEM!
 
  ********************************************************************************************/
+#include <sdkconfig.h>
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+
 #if __has_include (<hal/lcd_ll.h>)
 // Stop compile errors: /src/platforms/esp32s3/gdma_lcd_parallel16.hpp:64:10: fatal error: hal/lcd_ll.h: No such file or directory
   #pragma message "Compiling for ESP32-S3"
@@ -449,4 +453,5 @@
   } // end flip
 
 
+#endif
 #endif
