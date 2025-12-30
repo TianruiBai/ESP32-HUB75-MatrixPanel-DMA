@@ -1,0 +1,16 @@
+#pragma once
+
+#define R1_PIN_DEFAULT 20
+#define G1_PIN_DEFAULT 21
+#define B1_PIN_DEFAULT 22
+#define R2_PIN_DEFAULT 23
+#define G2_PIN_DEFAULT 24
+#define B2_PIN_DEFAULT 25
+#define A_PIN_DEFAULT  26
+#define B_PIN_DEFAULT  27
+#define C_PIN_DEFAULT  28
+#define D_PIN_DEFAULT  29
+#define E_PIN_DEFAULT  30 
+#define LAT_PIN_DEFAULT 31
+#define OE_PIN_DEFAULT  32
+#define CLK_PIN_DEFAULT 19
