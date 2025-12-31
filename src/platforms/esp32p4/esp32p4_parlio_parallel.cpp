@@ -33,6 +33,7 @@ bool Bus_Parallel16::init(void) {
         .valid_gpio_num = (gpio_num_t)-1,
         .trans_queue_depth = 4, 
         .max_transfer_size = 256 * 1024, // Set a large enough buffer size (256KB)
+        .dma_burst_size = DMA_MAX,
         .sample_edge = PARLIO_SAMPLE_EDGE_POS, 
     };
     
@@ -117,6 +118,7 @@ void Bus_Parallel16::flip_dma_output_buffer(int back_buffer_id) {
     parlio_transmit_config_t transmit_config = {
         .idle_value = 0x00,
         .flags = {
+            .queue_nonblocking = false,
             .loop_transmission = true 
         }
     };
