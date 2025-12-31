@@ -5,24 +5,6 @@
 #include <esp_log.h>
 #include <esp_err.h>
 
-#define PARLIO_HUB75_WIDTH      16 // 8-bit data width, used for transferring color data (RGB222) and control signals (OE and latch), 4-bit address width, 4-bit reserved
-#define PARLIO_HUB75_R1_IDX     7 // R1 bit position
-#define PARLIO_HUB75_R2_IDX     6 // R2 bit position
-#define PARLIO_HUB75_LATCH_IDX  5 // LATCH bit position
-#define PARLIO_HUB75_G1_IDX     4 // G1 bit position
-#define PARLIO_HUB75_G2_IDX     3 // G2 bit position
-#define PARLIO_HUB75_OE_IDX     2 // OE bit position
-#define PARLIO_HUB75_B1_IDX     1 // B1 bit position
-#define PARLIO_HUB75_B2_IDX     0 // B2 bit position
-#define PARLIO_HUB75_NUM_A_IDX  8 // Address A bit position
-#define PARLIO_HUB75_NUM_B_IDX  9 // Address B bit position
-#define PARLIO_HUB75_NUM_C_IDX  10 // Address C bit position
-#define PARLIO_HUB75_NUM_D_IDX  11 // Address D bit position
-#define PARLIO_HUB75_NUM_E_IDX  12 // Reserved for address E bit, for future
-#define PARLIO_HUB75_RESERVED2_IDX  13 // Reserved bit position
-#define PARLIO_HUB75_RESERVED3_IDX  14 // Reserved bit position
-#define PARLIO_HUB75_RESERVED4_IDX  15 // Reserved bit position
-
 static const char *TAG_PARLIO = "ESP32P4_PARLIO";
 
 const Bus_Parallel16::config_t& Bus_Parallel16::config(void) const {
@@ -41,29 +23,18 @@ bool Bus_Parallel16::init(void) {
         .clk_in_gpio_num = (gpio_num_t)-1,
         .output_clk_freq_hz = _cfg.bus_freq,
         .data_width = 16,
+        .data_gpio_nums = {
+            (gpio_num_t)_cfg.pin_d0, (gpio_num_t)_cfg.pin_d1, (gpio_num_t)_cfg.pin_d2, (gpio_num_t)_cfg.pin_d3,
+            (gpio_num_t)_cfg.pin_d4, (gpio_num_t)_cfg.pin_d5, (gpio_num_t)_cfg.pin_d6, (gpio_num_t)_cfg.pin_d7,
+            (gpio_num_t)_cfg.pin_d8, (gpio_num_t)_cfg.pin_d9, (gpio_num_t)_cfg.pin_d10, (gpio_num_t)_cfg.pin_d11,
+            (gpio_num_t)_cfg.pin_d12, (gpio_num_t)_cfg.pin_d13, (gpio_num_t)_cfg.pin_d14, (gpio_num_t)_cfg.pin_d15
+        },
         .clk_out_gpio_num = (gpio_num_t)_cfg.pin_wr,
         .valid_gpio_num = (gpio_num_t)-1,
-        .trans_queue_depth = 16, 
+        .trans_queue_depth = 4, 
         .max_transfer_size = 256 * 1024, // Set a large enough buffer size (256KB)
         .sample_edge = PARLIO_SAMPLE_EDGE_POS, 
     };
-
-    config.data_gpio_nums[PARLIO_HUB75_R1_IDX] = (gpio_num_t)_cfg.pin_d0;
-    config.data_gpio_nums[PARLIO_HUB75_G1_IDX] = (gpio_num_t)_cfg.pin_d1;
-    config.data_gpio_nums[PARLIO_HUB75_B1_IDX] = (gpio_num_t)_cfg.pin_d2;
-    config.data_gpio_nums[PARLIO_HUB75_R2_IDX] = (gpio_num_t)_cfg.pin_d3;
-    config.data_gpio_nums[PARLIO_HUB75_G2_IDX] = (gpio_num_t)_cfg.pin_d4;
-    config.data_gpio_nums[PARLIO_HUB75_B2_IDX] = (gpio_num_t)_cfg.pin_d5;
-    config.data_gpio_nums[PARLIO_HUB75_LATCH_IDX] = (gpio_num_t)_cfg.pin_d6;
-    config.data_gpio_nums[PARLIO_HUB75_OE_IDX] = (gpio_num_t)_cfg.pin_d7;
-    config.data_gpio_nums[PARLIO_HUB75_NUM_A_IDX] = (gpio_num_t)_cfg.pin_d8;
-    config.data_gpio_nums[PARLIO_HUB75_NUM_B_IDX] = (gpio_num_t)_cfg.pin_d9;
-    config.data_gpio_nums[PARLIO_HUB75_NUM_C_IDX] = (gpio_num_t)_cfg.pin_d10;
-    config.data_gpio_nums[PARLIO_HUB75_NUM_D_IDX] = (gpio_num_t)_cfg.pin_d11;
-    config.data_gpio_nums[PARLIO_HUB75_NUM_E_IDX] = (gpio_num_t)_cfg.pin_d12;
-    config.data_gpio_nums[PARLIO_HUB75_RESERVED2_IDX] = (gpio_num_t)-1;
-    config.data_gpio_nums[PARLIO_HUB75_RESERVED3_IDX] = (gpio_num_t)-1;
-    config.data_gpio_nums[PARLIO_HUB75_RESERVED4_IDX] = (gpio_num_t)-1;
     
     if (_cfg.invert_pclk) {
             config.sample_edge = PARLIO_SAMPLE_EDGE_NEG;
@@ -116,6 +87,7 @@ void Bus_Parallel16::dma_transfer_start() {
     parlio_transmit_config_t transmit_config = {
         .idle_value = 0x00,
         .flags = {
+            .queue_nonblocking = false,
             .loop_transmission = true 
         }
     };
