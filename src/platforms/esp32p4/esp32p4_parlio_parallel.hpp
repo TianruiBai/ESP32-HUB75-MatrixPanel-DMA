@@ -5,12 +5,12 @@
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 
 #include <driver/gpio.h>
-#include <driver/parlio_tx.h>
-#include <vector>
-#include <string.h>
+#include <esp_private/gdma.h>
+#include <hal/dma_types.h>
+#include <hal/gpio_hal.h>
 
-// Define descriptor type as void* since we don't use it directly but the library expects a type
-#define HUB75_DMA_DESCRIPTOR_T void 
+// DMA descriptor type expected by the library
+#define HUB75_DMA_DESCRIPTOR_T dma_descriptor_t
 #define DMA_MAX (4096-4)
 
 class Bus_Parallel16 
@@ -66,13 +66,16 @@ public:
 
 private:
     config_t _cfg;
-    parlio_tx_unit_handle_t _tx_unit = NULL;
-    
-    void* _buffer_a = nullptr;
-    void* _buffer_b = nullptr;
-    size_t _buffer_size = 0;
-    
-    bool _double_dma_buffer = false;
+    gdma_channel_handle_t dma_chan = nullptr;
+
+    uint32_t _dmadesc_count  = 0;   // number of DMA descriptors
+    uint32_t _dmadesc_a_idx  = 0;
+    uint32_t _dmadesc_b_idx  = 0;
+
+    HUB75_DMA_DESCRIPTOR_T* _dmadesc_a = nullptr;
+    HUB75_DMA_DESCRIPTOR_T* _dmadesc_b = nullptr;    
+
+    bool    _double_dma_buffer = false;
 };
 
 #endif
