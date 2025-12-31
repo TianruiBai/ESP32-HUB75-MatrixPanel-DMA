@@ -6,6 +6,7 @@
 #include <esp_err.h>
 #include <esp_rom_gpio.h>
 #include <esp_heap_caps.h>
+#include <soc/parlio_periph.h>
 
 static const char *TAG_PARLIO = "ESP32P4_PARLIO";
 
@@ -210,7 +211,7 @@ bool Bus_Parallel16::init_with_ll() {
     }
 
     hal_utils_clk_div_t clk_div = {
-        .integer = (int)div,
+        .integer = static_cast<uint32_t>(div),
         .denominator = 0,
         .numerator = 0,
     };
@@ -226,17 +227,24 @@ bool Bus_Parallel16::init_with_ll() {
     parlio_ll_tx_set_idle_data_value(dev, 0);
 
     // Route GPIO signals manually via matrix
+#if defined(SOC_PARLIO_SUPPORT_DMA) && defined(SOC_PARLIO_TX_UNITS_PER_GROUP)
     for (size_t i = 0; i < 16; ++i) {
         int8_t pin = _cfg.pin_data[i];
         if (pin >= 0) {
-            gpio_func_sel((gpio_num_t)pin, PIN_FUNC_GPIO);
+            gpio_reset_pin((gpio_num_t)pin);
+            gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
             esp_rom_gpio_connect_out_signal(pin, soc_parlio_signals[0].tx_units[0].data_sigs[i], false, false);
         }
     }
     if (_cfg.pin_wr >= 0) {
-        gpio_func_sel((gpio_num_t)_cfg.pin_wr, PIN_FUNC_GPIO);
+        gpio_reset_pin((gpio_num_t)_cfg.pin_wr);
+        gpio_set_direction((gpio_num_t)_cfg.pin_wr, GPIO_MODE_OUTPUT);
         esp_rom_gpio_connect_out_signal(_cfg.pin_wr, soc_parlio_signals[0].tx_units[0].clk_out_sig, false, false);
     }
+#else
+    ESP_LOGW(TAG_PARLIO, "Low-level GPIO matrix setup unavailable; low-level init will fail");
+    return false;
+#endif
 
     // Basic GDMA setup
     gdma_channel_alloc_config_t dma_chan_config = {
@@ -257,8 +265,8 @@ bool Bus_Parallel16::init_with_ll() {
     }
 
     gdma_strategy_config_t strategy = {
-        .auto_update_desc = false,
         .owner_check = true,
+        .auto_update_desc = false,
         .eof_till_data_popped = true,
     };
     gdma_apply_strategy(dma_chan, &strategy);

@@ -1,5 +1,9 @@
 #include "ESP32-HUB75-MatrixPanel-I2S-DMA.h"
 
+#ifndef DMA_MAX
+#define DMA_MAX 4095
+#endif
+
 #if defined(SPIRAM_DMA_BUFFER)
 // Sprite_TM saves the day again...
 // https://www.esp32.com/viewtopic.php?f=2&t=30584
