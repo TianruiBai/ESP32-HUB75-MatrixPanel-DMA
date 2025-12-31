@@ -68,21 +68,11 @@ private:
     config_t _cfg;
     parlio_tx_unit_handle_t _tx_unit = NULL;
     
-    struct Chunk {
-        void* ptr;
-        size_t size;
-    };
-    
-    std::vector<Chunk> _scatter_a;
-    std::vector<Chunk> _scatter_b;
-    
-    uint8_t* _shadow_buffer_a = nullptr;
-    uint8_t* _shadow_buffer_b = nullptr;
-    size_t _shadow_size = 0;
+    void* _buffer_a = nullptr;
+    void* _buffer_b = nullptr;
+    size_t _buffer_size = 0;
     
     bool _double_dma_buffer = false;
-    
-    void consolidate_buffer(const std::vector<Chunk>& scatter, uint8_t*& shadow, size_t& total_size);
 };
 
 #endif
