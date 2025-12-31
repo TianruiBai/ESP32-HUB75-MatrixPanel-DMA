@@ -31,9 +31,9 @@ bool Bus_Parallel16::init(void) {
         },
         .clk_out_gpio_num = (gpio_num_t)_cfg.pin_wr,
         .valid_gpio_num = (gpio_num_t)-1,
-        .trans_queue_depth = 4, 
+        .trans_queue_depth = 8, 
         .max_transfer_size = 256 * 1024, // Set a large enough buffer size (256KB)
-        .dma_burst_size = DMA_MAX,
+        .dma_burst_size = 32,
         .sample_edge = PARLIO_SAMPLE_EDGE_POS, 
     };
     
