@@ -6,6 +6,12 @@
  * DMA descriptor chains internally, so this implementation is significantly
  * simpler than the ESP32/ESP32-S3 I2S/LCD-peripheral paths.
  *
+ * IMPORTANT: Double-buffering (HUB75_I2S_CFG::double_buff = true) is strongly
+ * recommended on ESP32-P4.  In single-buffer mode, pixel updates will not be
+ * visible until the next dma_transfer_start() because the DMA reads from a
+ * contiguous shadow buffer, not the scattered per-row allocations that drawPixel
+ * writes to.  Double-buffered mode triggers a shadow re-sync on every flip.
+ *
  * Reference:
  *   - ESP-IDF PARLIO TX driver docs:
  *     https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/peripherals/parlio/parlio_tx.html
@@ -16,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include <driver/gpio.h>
 #include <driver/parlio_tx.h>
@@ -74,11 +81,10 @@ public:
      * The PARLIO driver manages DMA descriptors internally.  These methods
      * exist to satisfy the cross-platform interface used by the core library.
      *
-     * - allocate_dma_desc_memory(): no-op (driver allocates internally).
-     * - create_dma_desc_link():     records buffer start pointer and
-     *                               accumulates total frame size so we can
-     *                               call parlio_tx_unit_transmit() with the
-     *                               correct bit-length later.
+     * - allocate_dma_desc_memory(): allocates contiguous shadow buffer(s) and
+     *                               chunk-mapping arrays.
+     * - create_dma_desc_link():     records the source→shadow mapping for one
+     *                               DMA chunk and does the initial memcpy.
      */
     void enable_double_dma_desc();
     bool allocate_dma_desc_memory(size_t len);
@@ -94,29 +100,44 @@ private:
     parlio_tx_unit_handle_t _tx_unit = nullptr;
 
     /*
-     * Shadow buffers.
+     * Scatter-gather → contiguous shadow buffer.
      *
-     * The core library allocates each row independently, so the row data
-     * is scattered across the heap.  PARLIO's transmit API needs a single
-     * contiguous buffer.  We therefore allocate contiguous "shadow"
-     * buffers and memcpy each DMA chunk into them as create_dma_desc_link()
-     * is called.
+     * PROBLEM: The core library allocates each row independently via
+     * heap_caps_malloc (inside rowBitStruct). The pixel-drawing code
+     * (drawPixel, etc.) writes directly into these scattered row buffers.
+     * But parlio_tx_unit_transmit() requires a single contiguous buffer.
      *
-     * _shadow_X        – contiguous DMA-capable allocation
-     * _shadow_X_size   – total allocated size in bytes
-     * _shadow_X_offset – write cursor (bytes written so far)
+     * SOLUTION: We maintain a contiguous "shadow" buffer for each
+     * framebuffer (A and optionally B). During create_dma_desc_link()
+     * we record the mapping from each scattered source chunk to its
+     * position within the shadow, and do the initial memcpy. Before
+     * each transmit (start or flip), we re-sync the shadow from the
+     * live row buffers via _sync_shadow().
      */
-    uint8_t *_shadow_a       = nullptr;
-    size_t   _shadow_a_size  = 0;
-    size_t   _shadow_a_offset = 0;
 
-    uint8_t *_shadow_b       = nullptr;
-    size_t   _shadow_b_size  = 0;
-    size_t   _shadow_b_offset = 0;
+    /* One entry per create_dma_desc_link() call */
+    struct DmaChunkMapping {
+        void  *src;       // pointer into the live rowBitStruct::data
+        size_t offset;    // byte offset within the shadow buffer
+        size_t size;      // chunk size in bytes
+    };
+
+    /* Per-framebuffer state */
+    struct ShadowBuffer {
+        uint8_t               *buf       = nullptr;   // contiguous DMA-capable memory
+        size_t                 capacity  = 0;         // allocated size (bytes)
+        size_t                 used      = 0;         // bytes written so far
+        DmaChunkMapping       *map       = nullptr;   // array of chunk mappings
+        size_t                 map_cap   = 0;         // allocated entries in map[]
+        size_t                 map_count = 0;         // entries used in map[]
+    };
+
+    ShadowBuffer _fb[2];                // index 0 = A, index 1 = B
 
     bool _double_dma_buffer = false;
     bool _started = false;              // loop transmission is active
 
     /* Internal helpers */
+    void _sync_shadow(ShadowBuffer &sb);
     bool _transmit_loop(void *buffer, size_t size_bytes);
 };

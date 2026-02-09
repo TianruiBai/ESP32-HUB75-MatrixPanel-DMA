@@ -17,16 +17,29 @@
  *   dma_transfer_start()              – kick off continuous output
  *   flip_dma_output_buffer(id)        – swap to the other ping-pong buffer
  *
- * On ESP32-P4, the PARLIO driver manages descriptors internally.  We therefore
- * treat the descriptor-management calls as lightweight bookkeeping:
+ * On ESP32-P4, the PARLIO driver manages descriptors internally.  However,
+ * there is a fundamental mismatch: the core library allocates each row
+ * independently (separate heap_caps_malloc per rowBitStruct), producing
+ * scattered memory.  The PARLIO driver's parlio_tx_unit_transmit() requires
+ * a single contiguous buffer.
  *
- *   allocate_dma_desc_memory() → no-op (driver allocates internally)
- *   create_dma_desc_link()     → record the start pointer of the contiguous
- *                                framebuffer and accumulate the total size
- *   dma_transfer_start()       → call parlio_tx_unit_transmit() with loop mode
- *   flip_dma_output_buffer()   → call parlio_tx_unit_transmit() with new buffer
+ * SOLUTION — Contiguous shadow buffers with scatter-gather tracking:
  *
- * The PARLIO driver's loop-transmission mode with on_buffer_switched callback
+ *   allocate_dma_desc_memory() → allocate contiguous DMA shadow buffer(s)
+ *                                plus a chunk-mapping array
+ *   create_dma_desc_link()     → record {src, offset, size} mapping and
+ *                                do initial memcpy into the shadow buffer
+ *   dma_transfer_start()       → re-sync shadow from live row buffers,
+ *                                call parlio_tx_unit_transmit() with loop mode
+ *   flip_dma_output_buffer()   → re-sync the written-to shadow buffer,
+ *                                call parlio_tx_unit_transmit() with new buffer
+ *
+ * The re-sync step is necessary because the core library writes pixel data
+ * directly into the scattered rowBitStruct::data arrays (via drawPixel etc.),
+ * not into the shadow buffer.  Before each transmit we memcpy all tracked
+ * chunks from their live source pointers into the contiguous shadow.
+ *
+ * The PARLIO driver's loop-transmission mode with seamless buffer switching
  * is the ESP-IDF-sanctioned way to do double-buffered HUB75 output on P4.
  * See the advanced_rgb_led_matrix example in ESP-IDF v5.5.
  */
@@ -116,25 +129,19 @@ bool Bus_Parallel16::init(void) {
 
 void Bus_Parallel16::release(void) {
     if (_tx_unit) {
-        /*
-         * The PARLIO TX unit must be in the *disabled* state before deletion.
-         * If loop transmission was active we need to disable it.
-         * If it was never started (still in enabled-but-idle state from
-         * init()), a single disable is sufficient.
-         *
-         * parlio_tx_unit_disable() is safe to call even if no transmission
-         * is in progress — it simply transitions the state machine from
-         * "enabled" to "init".
-         */
         parlio_tx_unit_disable(_tx_unit);
         parlio_del_tx_unit(_tx_unit);
         _tx_unit = nullptr;
     }
 
-    if (_shadow_a) { heap_caps_free(_shadow_a); _shadow_a = nullptr; }
-    if (_shadow_b) { heap_caps_free(_shadow_b); _shadow_b = nullptr; }
-    _shadow_a_size = _shadow_a_offset = 0;
-    _shadow_b_size = _shadow_b_offset = 0;
+    for (int i = 0; i < 2; i++) {
+        if (_fb[i].buf) { heap_caps_free(_fb[i].buf); _fb[i].buf = nullptr; }
+        if (_fb[i].map) { free(_fb[i].map);           _fb[i].map = nullptr; }
+        _fb[i].capacity  = 0;
+        _fb[i].used      = 0;
+        _fb[i].map_cap   = 0;
+        _fb[i].map_count = 0;
+    }
     _started = false;
 }
 
@@ -147,40 +154,46 @@ void Bus_Parallel16::enable_double_dma_desc() {
 
 bool Bus_Parallel16::allocate_dma_desc_memory(size_t len) {
     /*
-     * The core library passes the total number of DMA descriptors required.
-     * Each descriptor covers up to DMA_MAX (4092) bytes.  We use this count
-     * to pre-allocate a contiguous shadow buffer large enough to hold the
-     * entire frame, since parlio_tx_unit_transmit() requires contiguous
-     * memory but the core library allocates each row independently.
+     * `len` = total number of DMA descriptors the core library needs.
+     * Each descriptor covers up to DMA_MAX (4092) bytes.  We allocate a
+     * contiguous shadow buffer sized to hold all the data, plus a mapping
+     * array with `len` entries (one per create_dma_desc_link() call).
+     *
+     * The shadow buffer doubles RAM usage for the framebuffer, but it's the
+     * only way to bridge the gap between the core library's per-row heap
+     * allocations and PARLIO's contiguous-buffer transmit API.
      */
-    static constexpr size_t DMA_MAX = 4096 - 4;   // same as ESP32-S3
-    size_t total_bytes = len * DMA_MAX;            // upper-bound estimate
+    static constexpr size_t DMA_MAX = 4096 - 4;  // same as ESP32-S3
 
-    /* Free any previous allocation */
-    if (_shadow_a) { heap_caps_free(_shadow_a); _shadow_a = nullptr; }
-    if (_shadow_b) { heap_caps_free(_shadow_b); _shadow_b = nullptr; }
+    int num_fbs = _double_dma_buffer ? 2 : 1;
 
-    _shadow_a = (uint8_t *)heap_caps_malloc(total_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!_shadow_a) {
-        ESP_LOGE(TAG, "Failed to allocate shadow buffer A (%zu bytes)", total_bytes);
-        return false;
-    }
-    _shadow_a_size   = total_bytes;
-    _shadow_a_offset = 0;
+    for (int i = 0; i < num_fbs; i++) {
+        /* Free any previous allocation */
+        if (_fb[i].buf) { heap_caps_free(_fb[i].buf); _fb[i].buf = nullptr; }
+        if (_fb[i].map) { free(_fb[i].map);           _fb[i].map = nullptr; }
 
-    ESP_LOGI(TAG, "Allocated shadow buffer A: %zu bytes (%lu descriptors)",
-             total_bytes, (unsigned long)len);
+        size_t total_bytes = len * DMA_MAX;   // upper-bound; actual may be smaller
 
-    if (_double_dma_buffer) {
-        _shadow_b = (uint8_t *)heap_caps_malloc(total_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        if (!_shadow_b) {
-            ESP_LOGE(TAG, "Failed to allocate shadow buffer B (%zu bytes)", total_bytes);
+        _fb[i].buf = (uint8_t *)heap_caps_malloc(total_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        if (!_fb[i].buf) {
+            ESP_LOGE(TAG, "Failed to allocate shadow buffer %c (%zu bytes)",
+                     'A' + i, total_bytes);
             return false;
         }
-        _shadow_b_size   = total_bytes;
-        _shadow_b_offset = 0;
+        _fb[i].capacity = total_bytes;
+        _fb[i].used     = 0;
 
-        ESP_LOGI(TAG, "Allocated shadow buffer B: %zu bytes", total_bytes);
+        _fb[i].map = (DmaChunkMapping *)calloc(len, sizeof(DmaChunkMapping));
+        if (!_fb[i].map) {
+            ESP_LOGE(TAG, "Failed to allocate chunk map %c (%zu entries)",
+                     'A' + i, len);
+            return false;
+        }
+        _fb[i].map_cap   = len;
+        _fb[i].map_count = 0;
+
+        ESP_LOGI(TAG, "Shadow buffer %c: %zu bytes (%lu desc slots)",
+                 'A' + i, total_bytes, (unsigned long)len);
     }
 
     return true;
@@ -188,32 +201,51 @@ bool Bus_Parallel16::allocate_dma_desc_memory(size_t len) {
 
 void Bus_Parallel16::create_dma_desc_link(void *data, size_t size, bool dmadesc_b) {
     /*
-     * The core library calls this once per DMA chunk (≤ DMA_MAX bytes).
-     * Each call may point to a different, non-contiguous heap allocation
-     * (rows are malloc'd separately).  We memcpy each chunk into our
-     * contiguous shadow buffer so that parlio_tx_unit_transmit() gets a
-     * single flat buffer it can pass to GDMA.
+     * Called once per DMA chunk (≤ DMA_MAX bytes) during setupDMA().
+     * `data` points into a rowBitStruct::data array — these are scattered
+     * across the heap.  We:
+     *   1. Record the mapping {src, offset, size} for later re-sync.
+     *   2. memcpy the initial data into the contiguous shadow buffer.
      */
-    if (dmadesc_b) {
-        if (_shadow_b && (_shadow_b_offset + size <= _shadow_b_size)) {
-            memcpy(_shadow_b + _shadow_b_offset, data, size);
-            _shadow_b_offset += size;
-        } else {
-            ESP_LOGE(TAG, "Shadow buffer B overflow (%zu + %zu > %zu)",
-                     _shadow_b_offset, size, _shadow_b_size);
-        }
-    } else {
-        if (_shadow_a && (_shadow_a_offset + size <= _shadow_a_size)) {
-            memcpy(_shadow_a + _shadow_a_offset, data, size);
-            _shadow_a_offset += size;
-        } else {
-            ESP_LOGE(TAG, "Shadow buffer A overflow (%zu + %zu > %zu)",
-                     _shadow_a_offset, size, _shadow_a_size);
-        }
+    int idx = dmadesc_b ? 1 : 0;
+    ShadowBuffer &sb = _fb[idx];
+
+    if (sb.map_count >= sb.map_cap) {
+        ESP_LOGE(TAG, "Chunk map %c overflow (%zu >= %zu)",
+                 'A' + idx, sb.map_count, sb.map_cap);
+        return;
     }
+    if (sb.used + size > sb.capacity) {
+        ESP_LOGE(TAG, "Shadow buffer %c overflow (%zu + %zu > %zu)",
+                 'A' + idx, sb.used, size, sb.capacity);
+        return;
+    }
+
+    /* Record the mapping */
+    DmaChunkMapping &m = sb.map[sb.map_count++];
+    m.src    = data;
+    m.offset = sb.used;
+    m.size   = size;
+
+    /* Initial copy into shadow */
+    memcpy(sb.buf + sb.used, data, size);
+    sb.used += size;
 }
 
 /* ──────────────────── DMA transfer control ──────────────────── */
+
+void Bus_Parallel16::_sync_shadow(ShadowBuffer &sb) {
+    /*
+     * Re-copy every chunk from the live row buffers into the shadow.
+     * This must be called before every transmit because the core library
+     * writes pixels directly into the scattered rowBitStruct::data arrays,
+     * not into our shadow buffer.
+     */
+    for (size_t i = 0; i < sb.map_count; i++) {
+        const DmaChunkMapping &m = sb.map[i];
+        memcpy(sb.buf + m.offset, m.src, m.size);
+    }
+}
 
 bool Bus_Parallel16::_transmit_loop(void *buffer, size_t size_bytes) {
     if (!_tx_unit) {
@@ -248,9 +280,9 @@ bool Bus_Parallel16::_transmit_loop(void *buffer, size_t size_bytes) {
 }
 
 void Bus_Parallel16::dma_transfer_start() {
-    ESP_LOGI(TAG, "Starting loop transmission (buffer A, %zu bytes)",
-             _shadow_a_offset);
-    _transmit_loop(_shadow_a, _shadow_a_offset);
+    _sync_shadow(_fb[0]);
+    ESP_LOGI(TAG, "Starting loop transmission (buffer A, %zu bytes)", _fb[0].used);
+    _transmit_loop(_fb[0].buf, _fb[0].used);
 }
 
 void Bus_Parallel16::dma_transfer_stop() {
@@ -271,17 +303,17 @@ void Bus_Parallel16::dma_transfer_stop() {
 void Bus_Parallel16::flip_dma_output_buffer(int back_buffer_id) {
     /*
      * back_buffer_id is the buffer the core library *just finished writing*.
-     * We want to display it, so we submit it for loop transmission.
+     * We want to display it, so:
+     *   1. Re-sync the shadow from the live scattered row buffers.
+     *   2. Submit the shadow for loop transmission.
      *
      * When in loop mode, calling parlio_tx_unit_transmit() with a new buffer
      * makes the driver switch to it seamlessly after the current DMA
      * descriptor chain completes — no tearing.
      */
-    if (back_buffer_id == 1) {
-        _transmit_loop(_shadow_b, _shadow_b_offset);
-    } else {
-        _transmit_loop(_shadow_a, _shadow_a_offset);
-    }
+    ShadowBuffer &sb = _fb[back_buffer_id];
+    _sync_shadow(sb);
+    _transmit_loop(sb.buf, sb.used);
 }
 
 #endif // CONFIG_IDF_TARGET_ESP32P4
